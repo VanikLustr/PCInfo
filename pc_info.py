@@ -6,16 +6,23 @@ from __future__ import annotations
 
 import datetime as dt
 import getpass
+import importlib.util
+import io
 import json
+import math
 import os
 import platform
 import socket
+import struct
 import subprocess
 import sys
 import threading
 import time
 import tkinter as tk
 import tkinter.font as tkfont
+import wave
+from collections import deque
+from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 try:
@@ -24,8 +31,55 @@ except ImportError:  # установка предлагается при зап
     psutil = None
 
 IS_WIN = sys.platform.startswith("win")
-FONT = "Segoe UI" if IS_WIN else "DejaVu Sans"
-MONO = "Consolas" if IS_WIN else "DejaVu Sans Mono"
+FONT = "Segoe UI"
+MONO = "JetBrains Mono"
+FONT_TITLE = "Bahnschrift SemiBold"
+PIE_NOTE = "тема сделана специально для webpie))"
+
+THEMES = {
+    "dark": {
+        "title": "Тёмная",
+        "bg": "#0f1115", "bg_alt": "#12151c", "card": "#181c25",
+        "card_hover": "#202631", "row_alt": "#151922", "border": "#272e3b",
+        "text": "#e8ecf4", "muted": "#8b95a7", "accent": "#5b8cff",
+        "accent_hover": "#749dff", "green": "#3ddc97", "purple": "#b58cff",
+        "orange": "#ff9f6b", "warn": "#ffb547", "danger": "#ff6b6b",
+        "on_accent": "#ffffff", "track": "#252b37", "select": "#263451",
+        "radius": 14, "dark_title": True,
+    },
+    "light": {
+        "title": "Светлая",
+        "bg": "#eef1f6", "bg_alt": "#e3e8f0", "card": "#ffffff",
+        "card_hover": "#f2f5fa", "row_alt": "#f7f9fc", "border": "#d8dee9",
+        "text": "#1b2430", "muted": "#6a7688", "accent": "#3d6fe0",
+        "accent_hover": "#2f5dcc", "green": "#0f9d6a", "purple": "#7651d3",
+        "orange": "#de7a3a", "warn": "#c08100", "danger": "#d64a4a",
+        "on_accent": "#ffffff", "track": "#e7ecf4", "select": "#dce8ff",
+        "radius": 14, "dark_title": False,
+    },
+    "amoled": {
+        "title": "AMOLED",
+        "bg": "#000000", "bg_alt": "#050505", "card": "#0a0b0d",
+        "card_hover": "#16181c", "row_alt": "#0d0e11", "border": "#24282f",
+        "text": "#f4f7fb", "muted": "#8b929d", "accent": "#58d6ff",
+        "accent_hover": "#86e4ff", "green": "#4be0a2", "purple": "#c59bff",
+        "orange": "#ff9d6b", "warn": "#ffcc4d", "danger": "#ff6b6b",
+        "on_accent": "#001319", "track": "#1b1f25", "select": "#123744",
+        "radius": 16, "dark_title": True,
+    },
+    "pie": {
+        "title": "Pie",
+        "bg": "#120a03", "bg_alt": "#1a0e04", "card": "#1f1205",
+        "card_hover": "#2e1a07", "row_alt": "#241405", "border": "#6e3900",
+        "text": "#fff3e3", "muted": "#b07a45", "accent": "#dd7100",
+        "accent_hover": "#e88925", "green": "#e89743", "purple": "#8e6133",
+        "orange": "#e88925", "warn": "#e88925", "danger": "#ff5e3a",
+        "on_accent": "#190c02", "track": "#3b2208", "select": "#6e3900",
+        "radius": 0, "dark_title": True,
+    },
+}
+THEME_ORDER = ("dark", "light", "amoled", "pie")
+CURRENT_THEME = "dark"
 
 BG = "#0f1115"
 BG_ALT = "#12151c"
@@ -42,7 +96,200 @@ PURPLE = "#b58cff"
 ORANGE = "#ff9f6b"
 WARN = "#ffb547"
 DANGER = "#ff6b6b"
+ON_ACCENT = "#ffffff"
+TRACK = "#252b37"
+SELECT_BG = "#263451"
+RADIUS = 14
 
+
+def apply_theme_globals(name: str):
+    global CURRENT_THEME, BG, BG_ALT, CARD, CARD_HOVER, ROW_ALT, BORDER
+    global TEXT, MUTED, ACCENT, ACCENT_HOVER, GREEN, PURPLE, ORANGE
+    global WARN, DANGER, ON_ACCENT, TRACK, SELECT_BG, RADIUS
+
+    theme = THEMES[name]
+    CURRENT_THEME = name
+    BG = theme["bg"]
+    BG_ALT = theme["bg_alt"]
+    CARD = theme["card"]
+    CARD_HOVER = theme["card_hover"]
+    ROW_ALT = theme["row_alt"]
+    BORDER = theme["border"]
+    TEXT = theme["text"]
+    MUTED = theme["muted"]
+    ACCENT = theme["accent"]
+    ACCENT_HOVER = theme["accent_hover"]
+    GREEN = theme["green"]
+    PURPLE = theme["purple"]
+    ORANGE = theme["orange"]
+    WARN = theme["warn"]
+    DANGER = theme["danger"]
+    ON_ACCENT = theme["on_accent"]
+    TRACK = theme["track"]
+    SELECT_BG = theme["select"]
+    RADIUS = theme["radius"]
+
+
+def configure_fonts(root):
+    global FONT, MONO, FONT_TITLE
+    families = set(tkfont.families(root))
+    FONT = next(
+        (name for name in ("Segoe UI", "Inter", "DejaVu Sans") if name in families),
+        "TkDefaultFont",
+    )
+    MONO = next(
+        (name for name in ("JetBrains Mono", "Cascadia Mono", "Consolas",
+                           "DejaVu Sans Mono") if name in families),
+        "TkFixedFont",
+    )
+    FONT_TITLE = next(
+        (name for name in ("Bahnschrift SemiBold", "Bahnschrift",
+                           "Segoe UI Semibold", "Segoe UI") if name in families),
+        FONT,
+    )
+
+
+def settings_path() -> Path:
+    base = os.environ.get("APPDATA") or str(Path.home())
+    return Path(base) / "PCInfo" / "settings.json"
+
+
+def load_settings() -> dict:
+    defaults = {"theme": "dark", "sounds": True}
+    try:
+        data = json.loads(settings_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return defaults
+    theme = data.get("theme")
+    if theme in THEMES:
+        defaults["theme"] = theme
+    defaults["sounds"] = bool(data.get("sounds", True))
+    return defaults
+
+
+def save_settings(theme: str, sounds: bool):
+    try:
+        path = settings_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"theme": theme, "sounds": bool(sounds)}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def find_donut() -> Path | None:
+    candidates = [Path(__file__).resolve().parent / "donut.py"]
+    for base in (
+        Path.home() / "Desktop",
+        Path(os.environ.get("USERPROFILE", "") or ".") / "Desktop",
+        Path(os.environ.get("OneDrive", "") or ".") / "Desktop",
+        Path(os.environ.get("OneDriveCommercial", "") or ".") / "Desktop",
+    ):
+        candidates.append(base / "donut.py")
+    seen = set()
+    for path in candidates:
+        try:
+            key = str(path.resolve()).lower()
+        except OSError:
+            key = str(path).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if path.is_file():
+                return path
+        except OSError:
+            continue
+    return None
+
+
+class SoundBank:
+    """Короткие синтезированные сигналы. Кнопки намеренно оставлены без звука."""
+
+    RATE = 44100
+
+    def __init__(self):
+        self.enabled = True
+        self._cache = {}
+        self._keepalive = b""
+        self._recipes = {
+            "startup": (
+                (392.00, 0.00, 0.55, 0.20),
+                (523.25, 0.12, 0.55, 0.22),
+                (659.25, 0.24, 0.65, 0.20),
+                (783.99, 0.36, 0.80, 0.16),
+            ),
+            "tab": (
+                (880.00, 0.000, 0.07, 0.09),
+                (1174.66, 0.045, 0.09, 0.07),
+            ),
+            "donut": (
+                (523.25, 0.00, 0.12, 0.12),
+                (659.25, 0.09, 0.12, 0.14),
+                (783.99, 0.18, 0.12, 0.16),
+                (1046.50, 0.27, 0.30, 0.15),
+            ),
+        }
+
+    def _render(self, name: str) -> bytes:
+        notes = self._recipes[name]
+        duration = max(start + length for _, start, length, _ in notes) + 0.08
+        count = int(self.RATE * duration)
+        samples = [0.0] * count
+        for frequency, start, length, gain in notes:
+            first = int(start * self.RATE)
+            size = min(count - first, int(length * self.RATE))
+            attack = max(1, int(0.008 * self.RATE))
+            for index in range(size):
+                t = index / self.RATE
+                envelope = min(1.0, index / attack) * math.exp(-3.2 * index / size)
+                value = (
+                    math.sin(2 * math.pi * frequency * t)
+                    + 0.35 * math.sin(4 * math.pi * frequency * t)
+                    + 0.12 * math.sin(6 * math.pi * frequency * t)
+                )
+                samples[first + index] += value * envelope * gain
+
+        frames = bytearray()
+        for sample in samples:
+            frames += struct.pack(
+                "<h", int(max(-1.0, min(1.0, sample)) * 32767))
+        buffer = io.BytesIO()
+        with wave.open(buffer, "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(self.RATE)
+            wav.writeframes(bytes(frames))
+        return buffer.getvalue()
+
+    def play(self, name: str):
+        if not self.enabled or not IS_WIN or name not in self._recipes:
+            return
+        try:
+            import winsound
+        except ImportError:
+            return
+        data = self._cache.get(name)
+        if data is None:
+            data = self._render(name)
+            self._cache[name] = data
+        self._keepalive = data
+        flags = winsound.SND_MEMORY | getattr(winsound, "SND_NODEFAULT", 0x0002)
+
+        def worker():
+            try:
+                # winsound не поддерживает SND_ASYNC вместе с SND_MEMORY,
+                # поэтому играем синхронно, но в отдельном потоке.
+                winsound.PlaySound(data, flags)
+            except (RuntimeError, OSError):
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+
+apply_theme_globals("dark")
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
@@ -256,34 +503,303 @@ def collect_cim():
 
 # ---------------------------------------------------------------- виджеты
 
-class MetricCard(tk.Frame):
+def _hex_rgb(color: str):
+    color = color.lstrip("#")
+    if len(color) == 3:
+        color = "".join(char * 2 for char in color)
+    return tuple(int(color[index:index + 2], 16) for index in (0, 2, 4))
+
+
+def mix_color(first: str, second: str, ratio: float) -> str:
+    ratio = max(0.0, min(1.0, ratio))
+    one, two = _hex_rgb(first), _hex_rgb(second)
+    return "#" + "".join(
+        f"{round(a + (b - a) * ratio):02x}" for a, b in zip(one, two))
+
+
+def _parent_bg(widget) -> str:
+    try:
+        return widget.cget("bg")
+    except tk.TclError:
+        return BG
+
+
+def draw_rounded(canvas, x1, y1, x2, y2, radius, fill,
+                 outline="", width=1, tags=()):
+    """Прямоугольник со скруглением; при radius=0 — обычный, с острыми углами."""
+    radius = max(0, int(radius))
+    radius = min(radius, int((x2 - x1) / 2), int((y2 - y1) / 2))
+    if radius <= 1:
+        return canvas.create_rectangle(
+            x1, y1, x2, y2, fill=fill, outline=outline, width=width, tags=tags)
+    points = (
+        x1 + radius, y1, x2 - radius, y1, x2, y1,
+        x2, y1 + radius, x2, y2 - radius, x2, y2,
+        x2 - radius, y2, x1 + radius, y2, x1, y2,
+        x1, y2 - radius, x1, y1 + radius, x1, y1,
+    )
+    return canvas.create_polygon(
+        points, smooth=True, splinesteps=24, fill=fill,
+        outline=outline, width=width, tags=tags)
+
+
+class RoundedPanel(tk.Canvas):
+    """Панель с нарисованными скруглёнными углами и обычным Frame внутри."""
+
+    def __init__(self, master, fill=None, outline=None, radius=None,
+                 pad=None, **kwargs):
+        kwargs.setdefault("bg", _parent_bg(master))
+        kwargs.setdefault("highlightthickness", 0)
+        kwargs.setdefault("bd", 0)
+        kwargs.setdefault("width", 1)
+        super().__init__(master, **kwargs)
+        self.fill = fill or CARD
+        self.outline = outline if outline is not None else BORDER
+        self.radius = RADIUS if radius is None else radius
+        self.pad = max(1, round(self.radius * 0.32)) if self.radius else 1
+        if pad is not None:
+            self.pad = pad
+        self.body = tk.Frame(self, bg=self.fill)
+        self._body_id = self.create_window(
+            self.pad, self.pad, anchor="nw", window=self.body)
+        self.bind("<Configure>", self._redraw_panel)
+
+    def _redraw_panel(self, event=None):
+        width = event.width if event else self.winfo_width()
+        height = event.height if event else self.winfo_height()
+        if width < 2 or height < 2:
+            return
+        self.delete("panel_bg")
+        draw_rounded(
+            self, 0.5, 0.5, width - 0.5, height - 0.5, self.radius,
+            fill=self.fill, outline=self.outline, width=1, tags=("panel_bg",))
+        self.coords(self._body_id, self.pad, self.pad)
+        self.itemconfigure(
+            self._body_id,
+            width=max(1, width - self.pad * 2),
+            height=max(1, height - self.pad * 2),
+        )
+        self.tag_lower("panel_bg")
+
+
+class RoundedButton(tk.Canvas):
+    """Кнопка со своим состоянием нажатия: вдавливается и меняет цвет."""
+
+    def __init__(self, master, text, command, accent=False, radius=None,
+                 font=None, height=36, padx=16):
+        self.text = text
+        self.command = command
+        self.accent = accent
+        self.radius = min(RADIUS, 10) if radius is None else radius
+        self.font = font or (FONT, 9, "bold")
+        self._state = "normal"
+        measure = tkfont.Font(root=master, font=self.font).measure(text)
+        super().__init__(
+            master,
+            bg=_parent_bg(master),
+            highlightthickness=0,
+            bd=0,
+            width=measure + padx * 2,
+            height=height,
+            cursor="hand2",
+        )
+        self.bind("<Configure>", lambda _event: self._redraw())
+        self.bind("<Enter>", lambda _event: self._set_state("hover"))
+        self.bind("<Leave>", lambda _event: self._set_state("normal"))
+        self.bind("<ButtonPress-1>", lambda _event: self._set_state("pressed"))
+        self.bind("<ButtonRelease-1>", self._release)
+
+    def _palette(self):
+        if self.accent:
+            normal = (ACCENT, ON_ACCENT, ACCENT)
+            hover = (ACCENT_HOVER, ON_ACCENT, ACCENT_HOVER)
+            pressed = (mix_color(ACCENT, "#000000", 0.24), ON_ACCENT,
+                       mix_color(ACCENT, "#000000", 0.38))
+        else:
+            normal = (CARD, TEXT, BORDER)
+            hover = (CARD_HOVER, TEXT, BORDER)
+            pressed = (ACCENT, ON_ACCENT, ACCENT_HOVER)
+        return {"normal": normal, "hover": hover, "pressed": pressed}
+
+    def _set_state(self, state):
+        if self._state != state:
+            self._state = state
+            self._redraw()
+
+    def _release(self, event):
+        was_pressed = self._state == "pressed"
+        inside = (0 <= event.x <= self.winfo_width()
+                  and 0 <= event.y <= self.winfo_height())
+        self._set_state("hover" if inside else "normal")
+        if was_pressed and self.command:
+            self.command()
+
+    def _redraw(self):
+        width = self.winfo_width()
+        height = self.winfo_height()
+        if width < 2 or height < 2:
+            return
+        fill, foreground, outline = self._palette()[self._state]
+        inset = 2 if self._state == "pressed" else 0
+        self.delete("all")
+        draw_rounded(
+            self, inset + 0.5, inset + 0.5, width - inset - 0.5,
+            height - inset - 0.5, self.radius, fill=fill,
+            outline=outline, width=1)
+        if self._state == "pressed":
+            self.create_line(
+                self.radius + inset, inset + 2,
+                width - self.radius - inset, inset + 2,
+                fill=mix_color(fill, "#ffffff", 0.22), width=1)
+        self.create_text(
+            width / 2, height / 2 + (1 if self._state == "pressed" else 0),
+            text=self.text, fill=foreground, font=self.font)
+
+
+class SoundToggle(tk.Canvas):
+    """Кастомная галочка «Звуки» в стиле текущей темы."""
+
+    def __init__(self, master, value=True, command=None):
+        self.text = "Звуки"
+        self.font = (FONT, 9, "bold")
+        self._on = bool(value)
+        self.command = command
+        measure = tkfont.Font(root=master, font=self.font).measure(self.text)
+        super().__init__(
+            master,
+            bg=_parent_bg(master),
+            highlightthickness=0,
+            bd=0,
+            width=measure + 34,
+            height=36,
+            cursor="hand2",
+        )
+        self.bind("<Configure>", lambda _event: self._redraw())
+        self.bind("<Button-1>", lambda _event: self.toggle())
+
+    def toggle(self):
+        self.set_value(not self._on, notify=True)
+
+    def set_value(self, value, notify=False):
+        self._on = bool(value)
+        self._redraw()
+        if notify and self.command:
+            self.command(self._on)
+
+    def _redraw(self):
+        width = self.winfo_width()
+        height = self.winfo_height()
+        if width < 2:
+            return
+        self.delete("all")
+        box = 16
+        radius = 0 if RADIUS == 0 else 4
+        left = 1
+        top = (height - box) / 2
+        draw_rounded(
+            self, left, top, left + box, top + box, radius,
+            fill=ACCENT if self._on else CARD,
+            outline=ACCENT if self._on else BORDER, width=1)
+        if self._on:
+            self.create_line(
+                left + 4, top + 8, left + 7, top + 11.5,
+                left + 12, top + 4.5,
+                fill=ON_ACCENT, width=2, capstyle="round", joinstyle="round")
+        self.create_text(
+            left + box + 8, height / 2, text=self.text, anchor="w",
+            fill=TEXT if self._on else MUTED, font=self.font)
+
+
+class HistoryChart(RoundedPanel):
+    """Живой график загрузки ЦП и памяти за последние 90 секунд."""
+
+    def __init__(self, master, cpu_values, ram_values):
+        super().__init__(master, fill=CARD, height=74, radius=min(RADIUS, 12))
+        self.cpu_values = cpu_values
+        self.ram_values = ram_values
+        self.span = max(2, getattr(cpu_values, "maxlen", 90) or 90)
+        self.canvas = tk.Canvas(
+            self.body, bg=CARD, highlightthickness=0, bd=0)
+        self.canvas.pack(fill="both", expand=True)
+        self.canvas.bind("<Configure>", lambda _event: self.refresh())
+
+    def refresh(self):
+        canvas = self.canvas
+        canvas.delete("all")
+        width = canvas.winfo_width()
+        height = canvas.winfo_height()
+        if width < 20 or height < 20:
+            return
+        left, right = 10, width - 10
+        top, bottom = 18, height - 8
+        for percent in (0, 50, 100):
+            y = bottom - (bottom - top) * percent / 100
+            canvas.create_line(left, y, right, y, fill=BORDER, dash=(2, 4))
+        canvas.create_text(
+            left, 7, text="ПУЛЬС · ЦП", anchor="w",
+            fill=ACCENT, font=(MONO, 8, "bold"))
+        canvas.create_text(
+            left + 92, 7, text="ОЗУ", anchor="w",
+            fill=GREEN, font=(MONO, 8, "bold"))
+        canvas.create_text(
+            right, 7, text=f"{self.span} с", anchor="e",
+            fill=MUTED, font=(MONO, 8))
+
+        step = (right - left) / (self.span - 1)
+        for values, color, fill_area in (
+                (self.cpu_values, ACCENT, True),
+                (self.ram_values, GREEN, False)):
+            points = []
+            for index, value in enumerate(values):
+                x = left + index * step
+                y = bottom - (bottom - top) * max(0.0, min(100.0, value)) / 100
+                points.extend((x, y))
+            if len(points) < 4:
+                continue
+            if fill_area:
+                canvas.create_polygon(
+                    *points, right, bottom, left, bottom,
+                    fill=mix_color(CARD, ACCENT, 0.10), outline="")
+            canvas.create_line(
+                *points, fill=color, width=2, smooth=True, splinesteps=12)
+            canvas.create_oval(
+                points[-2] - 2.5, points[-1] - 2.5,
+                points[-2] + 2.5, points[-1] + 2.5,
+                fill=color, outline=CARD)
+
+
+class MetricCard(RoundedPanel):
     """Карточка с крупным значением и необязательной полосой загрузки."""
 
-    def __init__(self, master, title, accent=ACCENT, show_bar=True, bar_height=5):
-        super().__init__(master, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
+    def __init__(self, master, title, accent=ACCENT, show_bar=True,
+                 bar_height=5, height=128):
+        super().__init__(master, fill=CARD, height=height)
         self.accent = accent
         self._percent = None
 
-        head = tk.Frame(self, bg=CARD)
-        head.pack(fill="x", padx=16, pady=(13, 0))
+        head = tk.Frame(self.body, bg=CARD)
+        head.pack(fill="x", padx=16, pady=(11, 0))
         tk.Label(head, text=title, bg=CARD, fg=MUTED,
-                 font=(FONT, 9, "bold")).pack(side="left")
+                 font=(MONO, 8, "bold")).pack(side="left")
         tk.Label(head, text="●", bg=CARD, fg=accent,
                  font=(FONT, 7)).pack(side="right")
 
-        self.value_label = tk.Label(self, text="—", bg=CARD, fg=TEXT,
-                                    font=(FONT, 22, "bold"), anchor="w")
-        self.value_label.pack(fill="x", padx=16, pady=(4, 0))
+        self.value_label = tk.Label(
+            self.body, text="—", bg=CARD, fg=TEXT,
+            font=(MONO, 20, "bold"), anchor="w")
+        self.value_label.pack(fill="x", padx=16, pady=(3, 0))
 
-        self.sub_label = tk.Label(self, text="", bg=CARD, fg=MUTED,
-                                  font=(FONT, 9), anchor="w", width=26)
-        self.sub_label.pack(fill="x", padx=16, pady=(1, 10))
+        self.sub_label = tk.Label(
+            self.body, text="", bg=CARD, fg=MUTED,
+            font=(FONT, 9), anchor="w")
+        self.sub_label.pack(fill="x", padx=16, pady=(0, 8))
 
         self.bar = None
         if show_bar:
-            self.bar = tk.Canvas(self, height=bar_height, bg=CARD,
-                                 highlightthickness=0, bd=0)
-            self.bar.pack(fill="x", padx=16, pady=(0, 14))
+            self.bar = tk.Canvas(
+                self.body, height=bar_height, bg=CARD,
+                highlightthickness=0, bd=0)
+            self.bar.pack(fill="x", padx=16, pady=(0, 12))
             self.bar.bind("<Configure>", lambda _event: self._draw_bar())
 
     def set(self, value, sub="", percent=None):
@@ -300,22 +816,26 @@ class MetricCard(tk.Frame):
         height = self.bar.winfo_height()
         if width <= 2:
             return
-        self.bar.create_rectangle(0, 0, width, height, fill="#252b37", outline="")
+        radius = 0 if RADIUS == 0 else min(4, height / 2)
+        draw_rounded(self.bar, 0, 0, width, height, radius, TRACK)
         if self._percent is None:
             return
         filled = max(0.0, min(100.0, float(self._percent))) / 100 * width
         color = load_color(self._percent) if self._percent >= 75 else self.accent
         if filled >= 2:
-            self.bar.create_rectangle(0, 0, filled, height, fill=color, outline="")
+            draw_rounded(
+                self.bar, 0, 0, max(filled, radius * 2), height,
+                radius, color)
 
 
-class Table(tk.Frame):
-    """Тёмная таблица с прокруткой и чередованием строк."""
+class Table(RoundedPanel):
+    """Таблица с прокруткой, чередованием строк и скруглённой рамкой."""
 
     def __init__(self, master, columns, height=8, style="Info.Treeview"):
-        super().__init__(master, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
+        super().__init__(
+            master, fill=CARD, height=height * 30 + 46, radius=min(RADIUS, 10))
         self.tree = ttk.Treeview(
-            self,
+            self.body,
             columns=[column[0] for column in columns],
             show="headings",
             height=height,
@@ -323,10 +843,11 @@ class Table(tk.Frame):
         )
         for key, title, width, anchor, stretch in columns:
             self.tree.heading(key, text=title, anchor=anchor)
-            self.tree.column(key, width=width, minwidth=50, anchor=anchor, stretch=stretch)
+            self.tree.column(key, width=width, minwidth=50, anchor=anchor,
+                             stretch=stretch)
 
         scrollbar = ttk.Scrollbar(
-            self, orient="vertical", command=self.tree.yview,
+            self.body, orient="vertical", command=self.tree.yview,
             style="Vertical.TScrollbar",
         )
         self.tree.configure(yscrollcommand=scrollbar.set)
@@ -390,22 +911,22 @@ class KeyValueTable(Table):
         super().add(key, (title, ""), tags=("section",))
 
 
-class CoreBars(tk.Frame):
+class CoreBars(RoundedPanel):
     """Нагрузка логических потоков с полосами, нарисованными на Canvas."""
 
     def __init__(self, master, count):
-        super().__init__(master, bg=CARD, highlightbackground=BORDER,
-                         highlightthickness=1)
+        super().__init__(
+            master, fill=CARD, height=420, radius=min(RADIUS, 10))
         self.values = [0.0] * max(0, count)
 
-        header = tk.Frame(self, bg=BG_ALT)
+        header = tk.Frame(self.body, bg=BG_ALT)
         header.pack(fill="x")
         tk.Label(header, text="Поток", bg=BG_ALT, fg=MUTED,
-                 font=(FONT, 9, "bold")).pack(side="left", padx=(11, 0), pady=8)
+                 font=(MONO, 8, "bold")).pack(side="left", padx=(11, 0), pady=8)
         tk.Label(header, text="Загрузка", bg=BG_ALT, fg=MUTED,
-                 font=(FONT, 9, "bold")).pack(side="right", padx=(0, 12), pady=8)
+                 font=(MONO, 8, "bold")).pack(side="right", padx=(0, 12), pady=8)
 
-        body = tk.Frame(self, bg=CARD)
+        body = tk.Frame(self.body, bg=CARD)
         body.pack(fill="both", expand=True)
         self.canvas = tk.Canvas(body, bg=CARD, highlightthickness=0, bd=0,
                                 yscrollincrement=30)
@@ -442,6 +963,7 @@ class CoreBars(tk.Frame):
         canvas.configure(scrollregion=(0, 0, width, total))
         bar_x = 105
         bar_width = max(30, width - bar_x - 78)
+        radius = 0 if RADIUS == 0 else 4
         for index, percent in enumerate(self.values):
             top = index * row
             canvas.create_rectangle(
@@ -452,17 +974,16 @@ class CoreBars(tk.Frame):
                 14, top + row / 2, text=f"Поток {index + 1}",
                 anchor="w", fill=TEXT, font=(FONT, 9),
             )
-            canvas.create_rectangle(
-                bar_x, top + 11, bar_x + bar_width, top + 19,
-                fill="#252b37", outline="",
-            )
+            draw_rounded(
+                canvas, bar_x, top + 11, bar_x + bar_width, top + 19,
+                radius, TRACK)
             filled = bar_width * max(0.0, min(100.0, percent)) / 100
             if filled >= 1:
                 color = load_color(percent) if percent >= 75 else ACCENT
-                canvas.create_rectangle(
-                    bar_x, top + 11, bar_x + filled, top + 19,
-                    fill=color, outline="",
-                )
+                draw_rounded(
+                    canvas, bar_x, top + 11,
+                    bar_x + max(filled, radius * 2), top + 19,
+                    radius, color)
             canvas.create_text(
                 width - 14, top + row / 2,
                 text=f"{percent:.1f}%".replace(".", ","),
@@ -475,10 +996,16 @@ class CoreBars(tk.Frame):
 class PCInfoApp(tk.Tk):
     def __init__(self):
         super().__init__()
+        settings = load_settings()
+        apply_theme_globals(settings["theme"])
+        configure_fonts(self)
+        self.sound = SoundBank()
+        self.sound.enabled = settings["sounds"]
+
         self.title("PC Info — сведения о компьютере")
         self.configure(bg=BG)
         self._fit_window()
-        self.minsize(940, 620)
+        self.minsize(1010, 700)
         self._setup_styles()
 
         self._job = None
@@ -492,6 +1019,15 @@ class PCInfoApp(tk.Tk):
         self._partitions = {}
         self._interfaces = {}
         self.metrics = {}
+        self._cpu_history = deque(maxlen=90)
+        self._ram_history = deque(maxlen=90)
+        self._title_clicks = 0
+        self._title_click_job = None
+        self._donut_window = None
+        self._donut_job = None
+        self._theme_popup = None
+        self._tab_ready = False
+        self._suppress_tab_sound = True
 
         self._host = socket.gethostname()
         self._user = getpass.getuser()
@@ -511,11 +1047,29 @@ class PCInfoApp(tk.Tk):
         self._build_interfaces()
         self._load_hardware()
         self._refresh_dynamic()
+        self._seed_history()
         self._job = self.after(1000, self._tick)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(30, self._dark_titlebar)
+        self.after(400, self._enable_tab_sound)
+        self.after(650, lambda: self.sound.play("startup"))
+        self.bind_all("<Control-Shift-KeyPress-D>", lambda _event: self._open_donut())
+        self.bind_all("<Control-KeyPress-t>", lambda _event: self._cycle_theme())
 
     # ------------------------------------------------------------ каркас
+
+    def _enable_tab_sound(self):
+        self._tab_ready = True
+        self._suppress_tab_sound = False
+
+    def _seed_history(self):
+        for values in (self._cpu_history, self._ram_history):
+            if values:
+                values.extendleft([values[-1]] * (values.maxlen - len(values)))
+
+    def _on_tab_changed(self, _event=None):
+        if getattr(self, "_tab_ready", False) and not self._suppress_tab_sound:
+            self.sound.play("tab")
 
     def _dark_titlebar(self):
         if not IS_WIN:
@@ -524,7 +1078,8 @@ class PCInfoApp(tk.Tk):
             import ctypes
 
             hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
-            enabled = ctypes.c_int(1)
+            enabled = ctypes.c_int(
+                1 if THEMES[CURRENT_THEME]["dark_title"] else 0)
             for attribute in (20, 19):
                 ctypes.windll.dwmapi.DwmSetWindowAttribute(
                     hwnd, attribute, ctypes.byref(enabled), ctypes.sizeof(enabled))
@@ -533,8 +1088,8 @@ class PCInfoApp(tk.Tk):
 
     def _fit_window(self):
         screen_w, screen_h = self.winfo_screenwidth(), self.winfo_screenheight()
-        width = min(1420, max(980, int(screen_w * 0.72)))
-        height = min(900, max(640, int(screen_h * 0.80)))
+        width = min(1420, max(1010, int(screen_w * 0.72)))
+        height = min(900, max(700, int(screen_h * 0.80)))
         x = (screen_w - width) // 2
         y = max(16, (screen_h - height) // 2 - 20)
         self.geometry(f"{width}x{height}+{x}+{y}")
@@ -580,7 +1135,7 @@ class PCInfoApp(tk.Tk):
             )
             style.map(
                 name,
-                background=[("selected", "#263451")],
+                background=[("selected", SELECT_BG)],
                 foreground=[("selected", TEXT)],
             )
             style.configure(
@@ -590,7 +1145,7 @@ class PCInfoApp(tk.Tk):
                 borderwidth=0,
                 relief="flat",
                 padding=(10, 8),
-                font=(FONT, 9, "bold"),
+                font=(MONO, 8, "bold"),
             )
             style.map(name + ".Heading", background=[("active", BG_ALT)])
 
@@ -606,29 +1161,161 @@ class PCInfoApp(tk.Tk):
         style.map("Vertical.TScrollbar", background=[("active", ACCENT)])
 
     def _button(self, parent, text, command, accent=False):
-        background = ACCENT if accent else CARD
-        foreground = "#ffffff" if accent else TEXT
-        hover = ACCENT_HOVER if accent else CARD_HOVER
-        button = tk.Button(
-            parent,
-            text=text,
-            command=command,
-            bg=background,
-            fg=foreground,
-            activebackground=hover,
-            activeforeground=foreground,
-            relief="flat",
-            bd=0,
-            cursor="hand2",
-            padx=15,
-            pady=8,
-            font=(FONT, 9, "bold"),
-            highlightthickness=1,
-            highlightbackground=ACCENT if accent else BORDER,
-        )
-        button.bind("<Enter>", lambda _event: button.config(bg=hover))
-        button.bind("<Leave>", lambda _event: button.config(bg=background))
-        return button
+        return RoundedButton(parent, text, command, accent=accent)
+
+    def _show_theme_menu(self):
+        if self._theme_popup is not None:
+            self._close_theme_popup()
+            return
+
+        popup = tk.Toplevel(self)
+        popup.withdraw()
+        popup.overrideredirect(True)
+        popup.transient(self)
+        popup.configure(bg=BORDER)
+        frame = tk.Frame(popup, bg=CARD, padx=6, pady=5)
+        frame.pack(padx=1, pady=1)
+
+        tk.Label(
+            frame, text="ТЕМА", bg=CARD, fg=MUTED,
+            font=(MONO, 8, "bold"), anchor="w").pack(
+                fill="x", padx=7, pady=(1, 4))
+
+        for name in THEME_ORDER:
+            theme = THEMES[name]
+            selected = name == CURRENT_THEME
+            row = tk.Frame(frame, bg=CARD, cursor="hand2")
+            row.pack(fill="x")
+            dot = tk.Label(
+                row, text="●", bg=CARD, fg=theme["accent"],
+                font=(FONT, 8), padx=7, pady=7)
+            dot.pack(side="left")
+            label = tk.Label(
+                row, text=theme["title"], bg=CARD,
+                fg=TEXT if selected else MUTED, font=(FONT, 10),
+                anchor="w", width=12, pady=5)
+            label.pack(side="left", fill="x", expand=True)
+            check = tk.Label(
+                row, text="✓" if selected else "", bg=CARD, fg=ACCENT,
+                font=(FONT, 9, "bold"), width=2, padx=5)
+            check.pack(side="right")
+
+            widgets = (row, dot, label, check)
+
+            def paint(color, items=widgets):
+                for item in items:
+                    item.configure(bg=color)
+
+            for widget in widgets:
+                widget.bind("<Enter>", lambda _e, p=paint: p(CARD_HOVER))
+                widget.bind("<Leave>", lambda _e, p=paint: p(CARD))
+                widget.bind(
+                    "<Button-1>",
+                    lambda _e, choice=name: self._select_theme(choice))
+
+        popup.update_idletasks()
+        width = popup.winfo_reqwidth()
+        height = popup.winfo_reqheight()
+        x = self.theme_button.winfo_rootx()
+        y = self.theme_button.winfo_rooty() + self.theme_button.winfo_height() + 5
+        x = max(8, min(x, self.winfo_screenwidth() - width - 8))
+        if y + height > self.winfo_screenheight() - 48:
+            y = self.theme_button.winfo_rooty() - height - 5
+        popup.geometry(f"{width}x{height}+{x}+{y}")
+        popup.deiconify()
+        popup.lift()
+        popup.grab_set()
+        self._theme_popup = popup
+        try:
+            popup.focus_force()
+        except tk.TclError:
+            pass
+        popup.bind("<Escape>", lambda _event: self._close_theme_popup())
+        popup.bind("<Button-1>", lambda _event: self._close_theme_popup())
+
+    def _select_theme(self, name):
+        self._close_theme_popup()
+        self.after(20, self._set_theme, name)
+
+    def _close_theme_popup(self):
+        popup = self._theme_popup
+        self._theme_popup = None
+        if popup is None:
+            return
+        try:
+            popup.grab_release()
+        except tk.TclError:
+            pass
+        try:
+            popup.destroy()
+        except tk.TclError:
+            pass
+        try:
+            self.focus_force()
+        except tk.TclError:
+            pass
+
+    def _set_theme(self, name):
+        if name not in THEMES or name == CURRENT_THEME:
+            return
+        apply_theme_globals(name)
+        save_settings(CURRENT_THEME, self.sound.enabled)
+        self._rebuild_ui()
+
+    def _cycle_theme(self):
+        index = THEME_ORDER.index(CURRENT_THEME)
+        self._set_theme(THEME_ORDER[(index + 1) % len(THEME_ORDER)])
+
+    def _set_sounds(self, enabled):
+        self.sound.enabled = bool(enabled)
+        save_settings(CURRENT_THEME, self.sound.enabled)
+
+    def _rebuild_ui(self):
+        self._close_theme_popup()
+        try:
+            index = self.notebook.index(self.notebook.select())
+        except (tk.TclError, AttributeError):
+            index = 0
+        if self._job:
+            try:
+                self.after_cancel(self._job)
+            except tk.TclError:
+                pass
+            self._job = None
+        self._suppress_tab_sound = True
+        self._tab_ready = False
+        try:
+            self.unbind_all("<MouseWheel>")
+        except tk.TclError:
+            pass
+        for child in self.winfo_children():
+            if isinstance(child, tk.Toplevel):
+                continue
+            child.destroy()
+        self.configure(bg=BG)
+        self._setup_styles()
+        self._build_ui()
+        self._fill_static()
+        self._build_partitions()
+        self._build_interfaces()
+        if self._hw_ready:
+            self._apply_hardware(self._hw_data)
+        elif self._hw_loading:
+            self.hw_table.add(
+                "hw_loading", "Состояние", "Сбор данных о компонентах…")
+        self._refresh_dynamic()
+        self._seed_history()
+        if index:
+            try:
+                self.notebook.select(index)
+            except tk.TclError:
+                pass
+        self.status_label.config(
+            text=f"Тема · {THEMES[CURRENT_THEME]['title']}", fg=MUTED)
+        self.status_dot.config(fg=GREEN)
+        self._job = self.after(1000, self._tick)
+        self.after(30, self._dark_titlebar)
+        self.after(350, self._enable_tab_sound)
 
     def _build_ui(self):
         header = tk.Frame(self, bg=BG)
@@ -636,13 +1323,26 @@ class PCInfoApp(tk.Tk):
 
         titles = tk.Frame(header, bg=BG)
         titles.pack(side="left")
-        tk.Label(titles, text="Сведения о компьютере", bg=BG, fg=TEXT,
-                 font=(FONT, 21, "bold")).pack(anchor="w")
-        tk.Label(titles, text="Все основные параметры системы в реальном времени",
-                 bg=BG, fg=MUTED, font=(FONT, 10)).pack(anchor="w", pady=(2, 0))
+        self.header_title = tk.Label(
+            titles, text="Сведения о компьютере", bg=BG, fg=TEXT,
+            font=(FONT_TITLE, 22, "bold"))
+        self.header_title.pack(anchor="w")
+        self.header_title.bind("<Button-1>", self._title_click)
+        self.header_subtitle = tk.Label(
+            titles, text="Все основные параметры системы в реальном времени",
+            bg=BG, fg=MUTED, font=(FONT, 10))
+        self.header_subtitle.pack(anchor="w", pady=(2, 0))
+        self.header_subtitle.bind("<Button-1>", self._title_click)
 
         actions = tk.Frame(header, bg=BG)
         actions.pack(side="right", anchor="center")
+        self.theme_button = RoundedButton(
+            actions, f"Тема · {THEMES[CURRENT_THEME]['title']}",
+            self._show_theme_menu)
+        self.theme_button.pack(side="left", padx=(0, 10))
+        self.sound_toggle = SoundToggle(
+            actions, value=self.sound.enabled, command=self._set_sounds)
+        self.sound_toggle.pack(side="left", padx=(0, 12))
         self._button(actions, "Обновить", self._manual_refresh).pack(
             side="left", padx=(0, 8))
         self._button(actions, "Сохранить отчёт", self._save_report, accent=True).pack(
@@ -650,6 +1350,7 @@ class PCInfoApp(tk.Tk):
 
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill="both", expand=True, padx=24)
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
         self._build_overview()
         self._build_cpu_tab()
         self._build_memory_tab()
@@ -658,7 +1359,7 @@ class PCInfoApp(tk.Tk):
         self._build_hardware_tab()
 
         status = tk.Frame(self, bg=BG)
-        status.pack(fill="x", padx=28, pady=(8, 14))
+        status.pack(fill="x", padx=28, pady=(8, 4 if CURRENT_THEME == "pie" else 14))
         self.status_dot = tk.Label(status, text="●", bg=BG, fg=GREEN,
                                    font=(FONT, 8))
         self.status_dot.pack(side="left")
@@ -670,13 +1371,22 @@ class PCInfoApp(tk.Tk):
             text=f"Python {platform.python_version()} · обновление каждую секунду",
             bg=BG,
             fg=MUTED,
-            font=(FONT, 9),
+            font=(MONO, 9),
         ).pack(side="right")
+
+        if CURRENT_THEME == "pie":
+            tk.Label(
+                self,
+                text=PIE_NOTE,
+                bg=BG,
+                fg=MUTED,
+                font=(MONO, 8),
+            ).pack(anchor="center", pady=(0, 9))
 
     @staticmethod
     def _tab_title(parent, text):
         return tk.Label(parent, text=text, bg=BG, fg=MUTED,
-                        font=(FONT, 9, "bold"))
+                        font=(MONO, 9, "bold"))
 
     # ------------------------------------------------------------ обзор
 
@@ -698,7 +1408,11 @@ class PCInfoApp(tk.Tk):
             card.grid(row=0, column=index, sticky="nsew",
                       padx=(0 if index == 0 else 6, 0))
 
-        self.overview_table = KeyValueTable(tab, height=10)
+        self.history_chart = HistoryChart(
+            tab, self._cpu_history, self._ram_history)
+        self.history_chart.pack(fill="x", pady=(0, 12))
+
+        self.overview_table = KeyValueTable(tab, height=6)
         self.overview_table.pack(fill="both", expand=True)
 
     def _fill_static(self):
@@ -799,6 +1513,7 @@ class PCInfoApp(tk.Tk):
                 ("percent", "Заполнено", 120, "e", True),
             ],
             height=8,
+            style="Mono.Treeview",
         )
         self.disk_table.pack(fill="both", expand=True, pady=(16, 12))
 
@@ -806,8 +1521,10 @@ class PCInfoApp(tk.Tk):
         cards.pack(fill="x")
         cards.columnconfigure(0, weight=1, uniform="io")
         cards.columnconfigure(1, weight=1, uniform="io")
-        self.card_read = MetricCard(cards, "ЧТЕНИЕ", ACCENT, show_bar=False)
-        self.card_write = MetricCard(cards, "ЗАПИСЬ", ORANGE, show_bar=False)
+        self.card_read = MetricCard(
+            cards, "ЧТЕНИЕ", ACCENT, show_bar=False, height=112)
+        self.card_write = MetricCard(
+            cards, "ЗАПИСЬ", ORANGE, show_bar=False, height=112)
         self.card_read.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         self.card_write.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
 
@@ -860,8 +1577,10 @@ class PCInfoApp(tk.Tk):
         cards.pack(fill="x", pady=(16, 12))
         cards.columnconfigure(0, weight=1, uniform="net")
         cards.columnconfigure(1, weight=1, uniform="net")
-        self.card_down = MetricCard(cards, "ПОЛУЧЕНО", GREEN, show_bar=False)
-        self.card_up = MetricCard(cards, "ОТПРАВЛЕНО", ORANGE, show_bar=False)
+        self.card_down = MetricCard(
+            cards, "ПОЛУЧЕНО", GREEN, show_bar=False, height=112)
+        self.card_up = MetricCard(
+            cards, "ОТПРАВЛЕНО", ORANGE, show_bar=False, height=112)
         self.card_down.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         self.card_up.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
 
@@ -877,6 +1596,7 @@ class PCInfoApp(tk.Tk):
                 ("sent", "Отправлено", 110, "e", True),
             ],
             height=8,
+            style="Mono.Treeview",
         )
         self.net_table.pack(fill="both", expand=True, pady=(0, 2))
 
@@ -1071,6 +1791,8 @@ class PCInfoApp(tk.Tk):
         self._update_memory()
         self._update_disks()
         self._update_network()
+        if hasattr(self, "history_chart"):
+            self.history_chart.refresh()
 
     def _update_overview(self):
         boot = self._boot
@@ -1135,6 +1857,7 @@ class PCInfoApp(tk.Tk):
             self.cpu_table.set("procs", "—")
 
         self.metrics["cpu"] = f"{load:.1f}%"
+        self._cpu_history.append(load)
 
     def _update_memory(self):
         vm = psutil.virtual_memory()
@@ -1153,6 +1876,7 @@ class PCInfoApp(tk.Tk):
         self.mem_table.set("swap_used", fmt_bytes(swap.used))
         self.mem_table.set("swap_free", fmt_bytes(swap.free))
         self.metrics["ram"] = f"{vm.percent:.0f}%"
+        self._ram_history.append(vm.percent)
 
     def _update_disks(self):
         for iid, (mountpoint, fstype) in self._partitions.items():
@@ -1325,10 +2049,129 @@ class PCInfoApp(tk.Tk):
             return
         messagebox.showinfo("PC Info", f"Отчёт сохранён:\n{path}", parent=self)
 
+    # ------------------------------------------------------------ пасхалка
+
+    def _title_click(self, _event=None):
+        self._title_clicks += 1
+        if self._title_click_job:
+            try:
+                self.after_cancel(self._title_click_job)
+            except tk.TclError:
+                pass
+            self._title_click_job = None
+        if self._title_clicks >= 5:
+            self._title_clicks = 0
+            self._open_donut()
+        else:
+            self._title_click_job = self.after(2800, self._reset_title_clicks)
+
+    def _reset_title_clicks(self):
+        self._title_clicks = 0
+        self._title_click_job = None
+
+    def _open_donut(self):
+        if self._donut_window is not None:
+            try:
+                if self._donut_window.winfo_exists():
+                    self._donut_window.lift()
+                    self._donut_window.focus_force()
+                    return
+            except tk.TclError:
+                pass
+            self._donut_window = None
+
+        path = find_donut()
+        if path is None:
+            messagebox.showinfo(
+                "PC Info",
+                "donut.py не найден.\nПоложи его на рабочий стол — и пасхалка оживёт.",
+                parent=self,
+            )
+            return
+
+        try:
+            spec = importlib.util.spec_from_file_location("pc_info_donut", path)
+            if spec is None or spec.loader is None:
+                raise ImportError("не удалось загрузить модуль")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            render = module.render
+            width = int(getattr(module, "WIDTH", 80))
+            height = int(getattr(module, "HEIGHT", 24))
+        except Exception as error:
+            messagebox.showerror(
+                "PC Info", f"Не удалось запустить пасхалку:\n{error}", parent=self)
+            return
+
+        window = tk.Toplevel(self)
+        window.title("donut.py")
+        window.configure(bg="#000000")
+        window.resizable(False, False)
+        window.transient(self)
+        font = tkfont.Font(root=window, family=MONO, size=9)
+        text_width = font.measure("M") * width
+        text_height = font.metrics("linespace") * height
+        win_width = min(self.winfo_screenwidth() - 80, text_width + 44)
+        win_height = min(self.winfo_screenheight() - 120, text_height + 78)
+        x = self.winfo_rootx() + max(0, (self.winfo_width() - win_width) // 2)
+        y = self.winfo_rooty() + max(0, (self.winfo_height() - win_height) // 2)
+        window.geometry(f"{win_width}x{win_height}+{x}+{y}")
+
+        label = tk.Label(
+            window, text="", bg="#000000", fg="#e88925",
+            font=(MONO, 9), justify="left")
+        label.pack(padx=14, pady=(12, 0))
+        hint = tk.Label(
+            window, text="donut.py  ·  клик или Esc — закрыть",
+            bg="#000000", fg="#8e6133", font=(MONO, 8))
+        hint.pack(side="bottom", pady=(0, 10))
+
+        self._donut_window = window
+        self.sound.play("donut")
+        angle_a = 0.0
+        angle_b = 0.0
+
+        def frame():
+            nonlocal angle_a, angle_b
+            if not window.winfo_exists():
+                return
+            try:
+                label.config(text="\n".join(render(angle_a, angle_b)))
+            except tk.TclError:
+                return
+            angle_a += 0.04
+            angle_b += 0.02
+            self._donut_job = window.after(50, frame)
+
+        def close(_event=None):
+            if self._donut_job is not None:
+                try:
+                    window.after_cancel(self._donut_job)
+                except tk.TclError:
+                    pass
+                self._donut_job = None
+            try:
+                window.destroy()
+            except tk.TclError:
+                pass
+            self._donut_window = None
+
+        window.protocol("WM_DELETE_WINDOW", close)
+        window.bind("<Escape>", close)
+        window.bind("<Button-1>", close)
+        label.bind("<Button-1>", close)
+        hint.bind("<Button-1>", close)
+        frame()
+
     def _on_close(self):
         if self._job:
             try:
                 self.after_cancel(self._job)
+            except tk.TclError:
+                pass
+        if self._title_click_job:
+            try:
+                self.after_cancel(self._title_click_job)
             except tk.TclError:
                 pass
         self.destroy()
